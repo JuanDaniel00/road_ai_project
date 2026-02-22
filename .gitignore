@@ -13,8 +13,6 @@ __pycache__/
 
 data/*
 !data/.gitkeep
-!data/raw_video/
-!data/gps_logs/
 
 output/*
 !output/.gitkeep
