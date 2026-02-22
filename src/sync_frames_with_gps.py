@@ -1,36 +1,34 @@
 import pandas as pd
+from haversine import haversine
 
-# Cargar datos
-frames = pd.read_csv("output/frame_timestamps.csv")
-gps = pd.read_csv("data/gps_logs/fake_gps.csv")
+df = pd.read_csv("output/drone_metadata.csv")
 
-# Función para encontrar GPS más cercano por tiempo
-def find_nearest_gps(timestamp):
-    if timestamp < gps["timestamp_sec"].min() or timestamp > gps["timestamp_sec"].max():
-        return None
+DISTANCE_INTERVAL = 7  # metros
 
-    gps["time_diff"] = abs(gps["timestamp_sec"] - timestamp)
-    nearest = gps.loc[gps["time_diff"].idxmin()]
-    return nearest
+selected_frames = []
+accumulated_distance = 0
 
-results = []
+for i in range(1, len(df)):
+    prev = df.iloc[i - 1]
+    current = df.iloc[i]
 
-for _, frame in frames.iterrows():
-    nearest_gps = find_nearest_gps(frame["timestamp_sec"])
+    p1 = (prev["lat"], prev["lon"])
+    p2 = (current["lat"], current["lon"])
 
-    if nearest_gps is None:
-        continue  # saltar frames fuera del rango GPS
+    distance = haversine(p1, p2) * 1000  # metros
 
-    results.append({
-        "image_name": frame["image_name"],
-        "frame_time": frame["timestamp_sec"],
-        "gps_time": nearest_gps["timestamp_sec"],
-        "lat": nearest_gps["lat"],
-        "lon": nearest_gps["lon"]
-    })
+    accumulated_distance += distance
+    if distance > 0:
+        print(f"Frame {i} → distancia: {distance:.4f} m")
 
+    if accumulated_distance >= DISTANCE_INTERVAL:
+        selected_frames.append(current)
+        print(f"✅ Frame seleccionado: {int(current['frame_number'])} (acumulado: {accumulated_distance:.2f} m)")
+        accumulated_distance = 0
 
-final_df = pd.DataFrame(results)
-final_df.to_csv("output/frames_with_gps.csv", index=False)
+result_df = pd.DataFrame(selected_frames)
+result_df.to_csv("output/frames_every_7m_real.csv", index=False)
 
-print("✅ Sincronización completada")
+print("Frames seleccionados:")
+print(result_df.head())
+print(f"Total seleccionados: {len(result_df)}")
