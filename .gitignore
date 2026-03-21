@@ -1,14 +1,36 @@
-# Created by venv; see https://docs.python.org/3/library/venv.html
+# ── Entorno virtual ───────────────────────────────────────────────────────────
 venv/
-__pycache__/
-*.pyc
-*.log
-*.avi
-*.mov
-*.csv
-.DS_Store
-.vscode/
-.ipynb_checkpoints/
 
-data/*
-!data/.gitkeep
+# ── Video fuente (archivos pesados, no van al repo) ───────────────────────────
+data/raw_video/*.MP4
+data/raw_video/*.mp4
+data/raw_video/*.MOV
+data/raw_video/*.mov
+data/raw_video/*.AVI
+data/raw_video/*.avi
+data/raw_video/video.MP4
+data/raw_video/*.zip
+
+# ── Outputs generados por el pipeline ────────────────────────────────────────
+data/raw_video/road_ai_output/
+output/
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+
+# ── Streamlit ─────────────────────────────────────────────────────────────────
+.streamlit/
+
+# ── Sistema operativo ─────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── IDEs ──────────────────────────────────────────────────────────────────────
+.vscode/settings.json
+.idea/
+*.suo
+*.user
