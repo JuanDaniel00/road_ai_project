@@ -14,6 +14,16 @@ data/raw_video/*.zip
 # ── Outputs generados por el pipeline ────────────────────────────────────────
 data/raw_video/road_ai_output/
 output/
+runs/
+
+# ── Modelos y artefactos pesados ─────────────────────────────────────────────
+*.pt
+*.pth
+*.onnx
+*.engine
+
+# ── Comprimidos de resultados/exportaciones ──────────────────────────────────
+*.zip
 
 # ── Python ────────────────────────────────────────────────────────────────────
 __pycache__/

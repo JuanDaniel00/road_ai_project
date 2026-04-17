@@ -19,7 +19,7 @@ Pipeline de inspección vial con dron. Procesa video aéreo y telemetría GPS pa
 
 ```
 road_ai_project/
-├── ejecutar.bat          ← doble clic para lanzar la app
+├── run.bat               ← doble clic para lanzar la app
 ├── requirements.txt
 ├── src/
 │   └── app.py            ← aplicación Streamlit (pipeline completo)
@@ -71,7 +71,7 @@ pip install -r requirements.txt
 
 ## Uso
 
-Haz doble clic en `ejecutar.bat`. Se abre el navegador con la interfaz automáticamente.
+Haz doble clic en `run.bat`. Se abre el navegador con la interfaz automáticamente.
 
 En la interfaz:
 
@@ -84,13 +84,23 @@ En la interfaz:
 
 ---
 
+## Modelo usado en pruebas
+
+Para las pruebas y validaciones del proyecto se está usando un **modelo/agente entrenado propiamente para detección de baches en vista aérea**.
+
+El modelo por defecto/base (por ejemplo uno genérico como `yolov8n.pt`) se mantiene como referencia rápida, pero **no ofrece el mismo rendimiento** en este caso de uso: suele presentar menor precisión y más falsos positivos/negativos frente al modelo entrenado específicamente para este dominio.
+
+Si vas a evaluar resultados o hacer demos, se recomienda usar siempre el modelo entrenado propio.
+
+---
+
 ## Parámetros de mejora de imagen
 
-| Parámetro | Valor por defecto | Efecto |
-|---|---|---|
-| CLAHE clip limit | 3.0 | Contraste local. Más alto = más realce. >4 puede amplificar ruido. |
-| CLAHE tile size | 8 px | Tamaño de región local. 8 es el estándar. |
-| Unsharp Mask | 1.2 | Realce de bordes finos. >1.5 introduce halos. |
+| Parámetro        | Valor por defecto | Efecto                                                             |
+| ---------------- | ----------------- | ------------------------------------------------------------------ |
+| CLAHE clip limit | 3.0               | Contraste local. Más alto = más realce. >4 puede amplificar ruido. |
+| CLAHE tile size  | 8 px              | Tamaño de región local. 8 es el estándar.                          |
+| Unsharp Mask     | 1.2               | Realce de bordes finos. >1.5 introduce halos.                      |
 
 El denoising usa `bilateralFilter` con parámetros fijos optimizados para imágenes de dron — no requiere ajuste manual.
 
@@ -127,7 +137,7 @@ streamlit
 
 ## Solución de problemas
 
-**La app no abre al hacer doble clic en `ejecutar.bat`**
+**La app no abre al hacer doble clic en `run.bat`**
 Verifica que el entorno virtual se llame `venv` y esté en la raíz del proyecto. Si lo nombraste diferente, edita la línea `call venv\Scripts\activate.bat` en el `.bat`.
 
 **"Ruta no válida o archivo no encontrado"**
