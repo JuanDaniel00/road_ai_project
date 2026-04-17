@@ -2,6 +2,8 @@
 
 Pipeline de inspección vial con dron. Procesa video aéreo y telemetría GPS para extraer y mejorar frames espaciados por distancia, listos para análisis con modelos de visión artificial.
 
+> Estado del proyecto: **versión temprana (early stage)**. Actualmente seguimos en proceso de entrenamiento del agente y de mejora de rendimiento (precisión, recall y estabilidad en inferencia).
+
 ---
 
 ## Qué hace
@@ -91,6 +93,47 @@ Para las pruebas y validaciones del proyecto se está usando un **modelo/agente 
 El modelo por defecto/base (por ejemplo uno genérico como `yolov8n.pt`) se mantiene como referencia rápida, pero **no ofrece el mismo rendimiento** en este caso de uso: suele presentar menor precisión y más falsos positivos/negativos frente al modelo entrenado específicamente para este dominio.
 
 Si vas a evaluar resultados o hacer demos, se recomienda usar siempre el modelo entrenado propio.
+
+---
+
+## Dashboard visual (agente v13)
+
+### Estadísticas clave de entrenamiento
+
+- Mejor mAP50-95: **0.3548** (epoch 47)
+- Mejor mAP50: **0.6502** (epoch 53)
+- Mejor precisión: **0.8939** (epoch 33)
+- Mejor recall: **0.6754** (epoch 51)
+
+### Estadísticas clave de inferencia final
+
+- Detecciones totales: **41**
+- Frames con detección: **23**
+- Confianza promedio: **0.6023**
+- Confianza máxima: **0.8612**
+
+### Gráficas del modelo entrenado
+
+Curvas de entrenamiento (loss y métricas por epoch):
+
+![Resultados de entrenamiento v13](docs/assets/train_results_v13.png)
+
+Curva Precision-Recall:
+
+![Curva PR v13](docs/assets/pr_curve_v13.png)
+
+Matriz de confusión normalizada:
+
+![Matriz de confusión normalizada v13](docs/assets/confusion_matrix_norm_v13.png)
+
+### Resultado final del programa
+
+Ejemplos de salida final con detección de baches:
+
+| Caso A                                                                         | Caso B                                                                         |
+| ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------ |
+| ![Ejemplo de detección final 3536](docs/assets/final_detection_frame_3536.jpg) | ![Ejemplo de detección final 2272](docs/assets/final_detection_frame_2272.jpg) |
+| ![Ejemplo de detección final 5316](docs/assets/final_detection_frame_5316.jpg) | ![Ejemplo de detección final 9770](docs/assets/final_detection_frame_9770.jpg) |
 
 ---
 
