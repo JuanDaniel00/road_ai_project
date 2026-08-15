@@ -10,10 +10,15 @@ data/raw_video/*.AVI
 data/raw_video/*.avi
 data/raw_video/video.MP4
 data/raw_video/*.zip
+videos/
 
 # ── Outputs generados por el pipeline ────────────────────────────────────────
 data/raw_video/road_ai_output/
 output/
+batch_log.txt
+
+# ── Dataset de etiquetado (las imágenes no se versionan, las labels sí) ───────
+dataset/images/
 
 # ── Modelos y artefactos pesados ─────────────────────────────────────────────
 *.pt
@@ -31,7 +36,8 @@ __pycache__/
 .pytest_cache/
 
 # ── Streamlit ─────────────────────────────────────────────────────────────────
-.streamlit/
+# config.toml (tema) se versiona; solo se ignoran credenciales locales
+.streamlit/secrets.toml
 
 # ── Sistema operativo ─────────────────────────────────────────────────────────
 .DS_Store
