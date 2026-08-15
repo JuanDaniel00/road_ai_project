@@ -11,91 +11,22 @@ import streamlit as st
 import shutil
 import re
 import os
+import io
+import zipfile
 import tempfile
 from pathlib import Path
+from datetime import datetime
 
 import cv2
-import numpy as np
 import pandas as pd
-from haversine import haversine
 
-# YOLOv8 — se importa aquí para que el error sea claro si no está instalado
-try:
-    from ultralytics import YOLO
-    YOLO_AVAILABLE = True
-except ImportError:
-    YOLO_AVAILABLE = False
-
-# ultralyticsplus — permite cargar modelos fine-tuned desde Hugging Face
-try:
-    from ultralyticsplus import YOLO as YOLO_HF
-    HF_AVAILABLE = True
-except ImportError:
-    HF_AVAILABLE = False
-
-# Clases COCO que NO son defectos de pavimento — filtro anti-ruido
-COCO_ROAD_NOISE = {
-    "motorcycle", "bicycle", "car", "truck", "bus", "person",
-    "dog", "cat", "traffic light", "stop sign", "parking meter",
-}
-
-# Nombre del modelo HF y cache local
-POTHOLE_HF_MODEL   = "keremberke/yolov8n-pothole-segmentation"
-POTHOLE_MODEL_NAME = "yolov8_pothole_hf.pt"
-PROJECT_ROOT       = Path(__file__).resolve().parent.parent
-
-
-def _patch_torch_safe_globals():
-    """
-    PyTorch 2.6 rompió la carga de modelos legacy al cambiar weights_only=True.
-    Solución: monkey-patch torch.load para forzar weights_only=False globalmente.
-    """
-    try:
-        import torch
-        _orig = torch.load
-        def _patched(f, *args, **kwargs):
-            kwargs["weights_only"] = False
-            return _orig(f, *args, **kwargs)
-        torch.load = _patched
-    except Exception:
-        pass
-
-_patch_torch_safe_globals()
-
-
-def load_pothole_model(model_path_resolved: str, status_slot):
-    if model_path_resolved == "AUTO_POTHOLE":
-        if not HF_AVAILABLE:
-            raise RuntimeError(
-                "ultralyticsplus no instalado. "
-                "Ejecuta: pip install ultralyticsplus"
-            )
-        status_slot.markdown(
-            "<span style='color:#fbbf24;font-size:0.82rem'>"
-            "⬇ Cargando modelo fine-tuned de baches desde Hugging Face…</span>",
-            unsafe_allow_html=True,
-        )
-        model = YOLO_HF(POTHOLE_HF_MODEL)
-        model.overrides["conf"]         = 0.25
-        model.overrides["iou"]          = 0.45
-        model.overrides["agnostic_nms"] = False
-        model.overrides["max_det"]      = 1000
-        status_slot.empty()
-        return model, True
-    else:
-        status_slot.markdown(
-            "<span style='color:#64748b;font-size:0.82rem'>"
-            "Cargando modelo local…</span>",
-            unsafe_allow_html=True,
-        )
-        model = YOLO(model_path_resolved)
-        status_slot.empty()
-        labels = set(model.names.values()) if model.names else set()
-        is_pothole = any(
-            "pothole" in l.lower() or "hole" in l.lower() or "crack" in l.lower()
-            for l in labels
-        )
-        return model, is_pothole
+from pipeline import (
+    TORCH_AVAILABLE, YOLO_AVAILABLE, HF_AVAILABLE,
+    COCO_ROAD_NOISE, POTHOLE_HF_MODEL, POTHOLE_MODEL_NAME, PROJECT_ROOT,
+    load_pothole_model, parse_srt, select_frames_by_distance, extract_frames,
+    apply_clahe, apply_unsharp, apply_bilateral, normalize_color,
+    enhance_frame_fn, enhance_all, reset_output_dir, run_yolo_detection,
+)
 
 
 # ── Página ────────────────────────────────────────────────────────────────────
@@ -111,131 +42,125 @@ st.set_page_config(
 
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=DM+Sans:wght@300;400;500;600&display=swap');
-
 html, body, [class*="css"] {
-    font-family: 'DM Sans', sans-serif;
-    background-color: #0d0f14;
-    color: #e2e8f0;
+    font-family: -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+    background-color: #f5f5f4;
+    color: #292524;
 }
-.stApp { background-color: #0d0f14; }
+.stApp { background-color: #f5f5f4; }
 
 .hero {
     text-align: center;
-    padding: 3rem 0 2rem 0;
-    border-bottom: 1px solid #1e2530;
+    padding: 2.5rem 0 2rem 0;
+    border-bottom: 3px solid #d97706;
     margin-bottom: 2.5rem;
 }
 .hero h1 {
-    font-family: 'Space Mono', monospace;
-    font-size: 2.4rem;
+    font-size: 2.2rem;
     font-weight: 700;
-    color: #f8fafc;
-    letter-spacing: -0.02em;
+    color: #1c1917;
     margin: 0;
 }
 .hero .subtitle {
-    font-size: 0.95rem;
-    color: #64748b;
+    font-size: 1rem;
+    color: #57534e;
     margin-top: 0.5rem;
-    font-weight: 300;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
+    font-weight: 400;
 }
-.accent { color: #38bdf8; }
+.accent { color: #d97706; }
 
 .step-card {
-    background: #131720;
-    border: 1px solid #1e2530;
-    border-radius: 12px;
-    padding: 1.4rem 1.6rem;
-    margin-bottom: 1rem;
+    background: #ffffff;
+    border: 1px solid #e7e5e4;
+    border-left: 5px solid #d6d3d1;
+    border-radius: 10px;
+    padding: 1.2rem 1.5rem;
+    margin-bottom: 0.9rem;
+    box-shadow: 0 1px 2px rgba(41, 37, 36, 0.06);
 }
 .step-label {
-    font-family: 'Space Mono', monospace;
-    font-size: 0.7rem;
-    color: #38bdf8;
-    letter-spacing: 0.12em;
+    font-size: 0.72rem;
+    color: #78716c;
+    letter-spacing: 0.06em;
     text-transform: uppercase;
-    margin-bottom: 0.3rem;
+    margin-bottom: 0.25rem;
+    font-weight: 600;
 }
-.step-title  { font-size: 1.05rem; font-weight: 600; color: #f1f5f9; }
-.step-desc   { font-size: 0.85rem; color: #64748b; margin-top: 0.2rem; }
+.step-title  { font-size: 1.05rem; font-weight: 600; color: #1c1917; }
+.step-desc   { font-size: 0.87rem; color: #78716c; margin-top: 0.2rem; }
 
-.metric-row  { display: flex; gap: 1rem; margin: 1.5rem 0; }
+.metric-row  { display: flex; gap: 1rem; margin: 1.5rem 0; flex-wrap: wrap; }
 .metric-box  {
     flex: 1;
-    background: #131720;
-    border: 1px solid #1e2530;
+    min-width: 130px;
+    background: #ffffff;
+    border: 1px solid #e7e5e4;
     border-radius: 10px;
     padding: 1.2rem;
     text-align: center;
 }
 .metric-val {
-    font-family: 'Space Mono', monospace;
-    font-size: 2rem;
+    font-size: 1.9rem;
     font-weight: 700;
-    color: #38bdf8;
+    color: #44403c;
 }
 .metric-lbl {
-    font-size: 0.78rem;
-    color: #64748b;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    margin-top: 0.2rem;
+    font-size: 0.8rem;
+    color: #78716c;
+    margin-top: 0.3rem;
 }
 
 .stButton > button {
-    background: #38bdf8 !important;
-    color: #0d0f14 !important;
-    font-family: 'Space Mono', monospace !important;
+    background: #d97706 !important;
+    color: #ffffff !important;
     font-weight: 700 !important;
-    font-size: 0.9rem !important;
+    font-size: 0.95rem !important;
     border: none !important;
     border-radius: 8px !important;
     padding: 0.75rem 2rem !important;
-    letter-spacing: 0.04em !important;
 }
+.stButton > button:hover { background: #b45309 !important; }
 
 [data-testid="stFileUploader"] {
-    background: #131720;
-    border: 1px dashed #2d3748;
+    background: #ffffff;
+    border: 1px dashed #d6d3d1;
     border-radius: 10px;
     padding: 0.5rem;
 }
 
-.stProgress > div > div { background: #38bdf8 !important; }
+.stProgress > div > div { background: #d97706 !important; }
 
 .badge {
-    display: inline-block;
-    padding: 0.25rem 0.75rem;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.3rem 0.85rem;
     border-radius: 999px;
-    font-size: 0.75rem;
+    font-size: 0.78rem;
     font-weight: 600;
-    font-family: 'Space Mono', monospace;
 }
-.badge-ok   { background: #052e16; color: #4ade80; border: 1px solid #166534; }
-.badge-err  { background: #450a0a; color: #f87171; border: 1px solid #7f1d1d; }
-.badge-warn { background: #2d1b00; color: #fbbf24; border: 1px solid #78350f; }
+.badge-pending { background: #f5f5f4; color: #78716c; border: 1px solid #d6d3d1; }
+.badge-running { background: #fffbeb; color: #b45309; border: 1px solid #fcd34d; }
+.badge-ok      { background: #f0fdf4; color: #15803d; border: 1px solid #86efac; }
+.badge-err     { background: #fef2f2; color: #b91c1c; border: 1px solid #fca5a5; }
 
-hr { border-color: #1e2530; }
+hr { border-color: #e7e5e4; }
 
 [data-testid="stExpander"] {
-    background: #131720;
-    border: 1px solid #1e2530;
+    background: #ffffff;
+    border: 1px solid #e7e5e4;
     border-radius: 10px;
 }
 
 .img-caption {
-    font-family: 'Space Mono', monospace;
-    font-size: 0.7rem;
-    color: #475569;
+    font-size: 0.78rem;
+    color: #78716c;
     text-align: center;
     margin-top: 0.3rem;
 }
-.path-hint      { font-size: 0.78rem; margin-top: 0.3rem; font-family: 'Space Mono', monospace; color: #475569; }
-.path-hint.ok   { color: #4ade80; }
-.path-hint.err  { color: #f87171; }
+.path-hint      { font-size: 0.82rem; margin-top: 0.3rem; color: #78716c; }
+.path-hint.ok   { color: #15803d; }
+.path-hint.err  { color: #b91c1c; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -244,7 +169,7 @@ hr { border-color: #1e2530; }
 st.markdown("""
 <div class="hero">
     <h1>🛣️ Road <span class="accent">AI</span> Inspector</h1>
-    <div class="subtitle">Pipeline de inspección vial con dron · Detección de baches y defectos</div>
+    <div class="subtitle">Inspección de pavimento a partir de video de dron</div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -257,229 +182,10 @@ if "zip_ready" not in st.session_state:
     st.session_state.zip_ready = False
 if "zip_bytes" not in st.session_state:
     st.session_state.zip_bytes = None
-
-# ── Funciones pipeline ─────────────────────────────────────────────────────────
-
-def parse_srt(srt_content: str) -> pd.DataFrame:
-    data = []
-    for block in srt_content.split("\n\n"):
-        fm = re.search(r"FrameCnt:\s*(\d+)", block)
-        la = re.search(r"\[latitude:\s*([-\d\.]+)\]", block)
-        lo = re.search(r"\[longitude:\s*([-\d\.]+)\]", block)
-        if fm and la and lo:
-            data.append({
-                "frame_number": int(fm.group(1)),
-                "lat": float(la.group(1)),
-                "lon": float(lo.group(1)),
-            })
-    return pd.DataFrame(data)
-
-
-def select_frames_by_distance(df: pd.DataFrame, interval_m: float) -> pd.DataFrame:
-    selected, accumulated = [], 0.0
-    for i in range(1, len(df)):
-        p1 = (df.iloc[i-1]["lat"], df.iloc[i-1]["lon"])
-        p2 = (df.iloc[i]["lat"],   df.iloc[i]["lon"])
-        accumulated += haversine(p1, p2) * 1000
-        if accumulated >= interval_m:
-            selected.append(df.iloc[i])
-            accumulated = 0.0
-    return pd.DataFrame(selected)
-
-
-def extract_frames(video_path: str, frame_numbers: list, out_dir: Path,
-                   progress_bar, status_text) -> list:
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        return []
-    total_video = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    saved = []
-    for idx, fn in enumerate(sorted(frame_numbers)):
-        if fn >= total_video:
-            continue
-        cap.set(cv2.CAP_PROP_POS_FRAMES, fn)
-        actual_pos = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
-        if actual_pos != fn:
-            while actual_pos < fn:
-                cap.grab()
-                actual_pos += 1
-        ret, frame = cap.read()
-        if not ret:
-            continue
-        path = out_dir / f"frame_{fn}.jpg"
-        cv2.imwrite(str(path), frame)
-        saved.append(str(path))
-        progress_bar.progress((idx + 1) / len(frame_numbers))
-        status_text.markdown(
-            f"<span style='color:#64748b;font-size:0.82rem'>Extrayendo frame {idx+1}/{len(frame_numbers)}</span>",
-            unsafe_allow_html=True,
-        )
-    cap.release()
-    return saved
-
-
-def apply_clahe(img, clip, tile):
-    lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
-    l, a, b = cv2.split(lab)
-    clahe = cv2.createCLAHE(clipLimit=clip, tileGridSize=(tile, tile))
-    return cv2.cvtColor(cv2.merge([clahe.apply(l), a, b]), cv2.COLOR_LAB2BGR)
-
-def apply_unsharp(img, strength):
-    blurred = cv2.GaussianBlur(img, (5, 5), 0)
-    return cv2.addWeighted(img, 1 + strength, blurred, -strength, 0)
-
-def apply_bilateral(img):
-    return cv2.bilateralFilter(img, d=9, sigmaColor=75, sigmaSpace=75)
-
-def normalize_color(img):
-    result = img.copy()
-    for i in range(3):
-        ch = img[:, :, i]
-        mn, mx = int(ch.min()), int(ch.max())
-        rng = mx - mn
-        if 0 < rng < 51:
-            result[:, :, i] = ((ch.astype(np.float32) - mn) / rng * 255).astype(np.uint8)
-    return result
-
-def enhance_frame_fn(img, clahe_clip, clahe_tile, unsharp_str):
-    img = apply_bilateral(img)
-    img = apply_clahe(img, clahe_clip, clahe_tile)
-    img = apply_unsharp(img, unsharp_str)
-    img = normalize_color(img)
-    return img
-
-# ── FIX: procesamiento secuencial, sin multiprocessing ────────────────────────
-def enhance_all(frame_paths, out_dir, clahe_clip, clahe_tile,
-                unsharp_str, progress_bar, status_text):
-    enhanced = []
-    total = len(frame_paths)
-    for idx, fp in enumerate(frame_paths):
-        img = cv2.imread(fp)
-        if img is None:
-            continue
-        enh = enhance_frame_fn(img, clahe_clip, clahe_tile, unsharp_str)
-        out_path = Path(out_dir) / Path(fp).name
-        cv2.imwrite(str(out_path), enh, [cv2.IMWRITE_JPEG_QUALITY, 95])
-        enhanced.append(str(out_path))
-        progress_bar.progress((idx + 1) / total)
-        status_text.markdown(
-            f"<span style='color:#64748b;font-size:0.82rem'>"
-            f"Mejorando frame {idx+1}/{total}</span>",
-            unsafe_allow_html=True,
-        )
-    return enhanced
-
-
-def reset_output_dir(dir_path: Path):
-    if dir_path.exists():
-        shutil.rmtree(dir_path)
-    dir_path.mkdir(parents=True, exist_ok=True)
-
-
-def run_yolo_detection(model, is_pothole_model: bool,
-                       enhanced_paths: list, selected_df: pd.DataFrame,
-                       det_dir: Path, conf_threshold: float,
-                       max_box_ratio: float, road_margin_pct: float,
-                       progress_bar, status_text) -> tuple[list, pd.DataFrame]:
-    annotated_paths   = []
-    detection_records = []
-
-    gps_index = {}
-    if not selected_df.empty and "frame_number" in selected_df.columns:
-        for _, row in selected_df.iterrows():
-            gps_index[int(row["frame_number"])] = (row["lat"], row["lon"])
-
-    for idx, fp in enumerate(enhanced_paths):
-        img = cv2.imread(fp)
-        if img is None:
-            annotated_paths.append(None)
-            continue
-
-        h, w = img.shape[:2]
-        frame_area = h * w
-
-        margin_px = int(w * road_margin_pct / 100)
-        roi_x_min = margin_px
-        roi_x_max = w - margin_px
-
-        results   = model(img, conf=conf_threshold, verbose=False)[0]
-        annotated = img.copy()
-
-        if road_margin_pct > 0:
-            cv2.line(annotated, (roi_x_min, 0), (roi_x_min, h), (50, 80, 120), 1)
-            cv2.line(annotated, (roi_x_max, 0), (roi_x_max, h), (50, 80, 120), 1)
-
-        frame_num = int(Path(fp).stem.split("_")[-1])
-        lat, lon  = gps_index.get(frame_num, (None, None))
-
-        valid_boxes = []
-        rejected = 0
-        for box in results.boxes:
-            cls   = int(box.cls[0])
-            label = model.names.get(cls, str(cls))
-
-            if not is_pothole_model and label.lower() in COCO_ROAD_NOISE:
-                rejected += 1
-                continue
-
-            x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
-            box_area = (x2 - x1) * (y2 - y1)
-
-            if box_area / frame_area * 100 > max_box_ratio:
-                rejected += 1
-                continue
-
-            cx = (x1 + x2) // 2
-            if cx < roi_x_min or cx > roi_x_max:
-                rejected += 1
-                continue
-
-            valid_boxes.append((box, label, x1, y1, x2, y2))
-
-        for box, label, x1, y1, x2, y2 in valid_boxes:
-            conf_val = float(box.conf[0])
-            color = (0, 50, 255) if is_pothole_model else (0, 140, 255)
-            cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
-            tag = f"{label} {conf_val:.2f}"
-            (tw, th), _ = cv2.getTextSize(tag, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)
-            cv2.rectangle(annotated, (x1, y1 - th - 6), (x1 + tw + 4, y1), color, -1)
-            cv2.putText(annotated, tag, (x1 + 2, y1 - 3),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
-
-            detection_records.append({
-                "frame_number": frame_num,
-                "lat": lat,
-                "lon": lon,
-                "label": label,
-                "confidence": round(conf_val, 4),
-                "x1": x1, "y1": y1, "x2": x2, "y2": y2,
-                "width_px":  x2 - x1,
-                "height_px": y2 - y1,
-            })
-
-        if valid_boxes:
-            out_path = det_dir / Path(fp).name
-            cv2.imwrite(str(out_path), annotated, [cv2.IMWRITE_JPEG_QUALITY, 95])
-            annotated_paths.append(str(out_path))
-        else:
-            annotated_paths.append(None)
-
-        progress_bar.progress((idx + 1) / len(enhanced_paths))
-        n_det = len(valid_boxes)
-        color_hex = "f87171" if n_det else "38bdf8"
-        rej_txt = f" · <span style='color:#475569'>{rejected} descartadas</span>" if rejected else ""
-        status_text.markdown(
-            f"<span style='color:#64748b;font-size:0.82rem'>"
-            f"Analizando frame {idx+1}/{len(enhanced_paths)} · "
-            f"<span style='color:#{color_hex}'>"
-            f"{n_det} bache{'s' if n_det != 1 else ''} detectado{'s' if n_det != 1 else ''}"
-            f"</span>{rej_txt}</span>",
-            unsafe_allow_html=True,
-        )
-
-    detections_df = pd.DataFrame(detection_records) if detection_records else pd.DataFrame()
-    return annotated_paths, detections_df
-
+if "zip_filename" not in st.session_state:
+    st.session_state.zip_filename = None
+if "input_generation" not in st.session_state:
+    st.session_state.input_generation = 0
 
 # ── Layout ─────────────────────────────────────────────────────────────────────
 
@@ -495,6 +201,7 @@ with col_left:
         label="video_path",
         placeholder=r"C:\Users\TuUsuario\Videos\vuelo1.MP4",
         label_visibility="collapsed",
+        key=f"video_path_{st.session_state.input_generation}",
     )
 
     video_ok = False
@@ -510,31 +217,39 @@ with col_left:
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    st.markdown("**Telemetría GPS (.SRT)**")
+    st.markdown("**Registro de vuelo GPS (.SRT)**")
     srt_file = st.file_uploader(
         label="srt_upload",
         type=["srt", "SRT"],
         label_visibility="collapsed",
+        help="Archivo de telemetría que el dron genera junto con el video, con la ubicación GPS de cada instante del vuelo.",
+        key=f"srt_upload_{st.session_state.input_generation}",
     )
 
     st.markdown("<hr>", unsafe_allow_html=True)
-    st.markdown("### Modelo YOLOv8")
+    st.markdown("### Sistema de detección de baches")
 
     if not YOLO_AVAILABLE:
         st.markdown(
-            "<div style='color:#f87171;font-size:0.83rem'>⚠️ ultralytics no instalado. "
-            "Ejecuta: <code>pip install ultralytics ultralyticsplus</code></div>",
+            "<div style='color:#b91c1c;font-size:0.85rem'>⚠️ El sistema de detección no está instalado en este equipo.</div>",
             unsafe_allow_html=True,
         )
+        with st.expander("Instrucciones de instalación"):
+            st.code("pip install ultralytics ultralyticsplus")
 
-    use_custom_model = st.toggle("Usar modelo propio (.pt)", value=False)
+    use_custom_model = st.toggle(
+        "Usar un modelo propio entrenado",
+        value=False,
+        help="Actívalo solo si cuentas con tu propio modelo de detección entrenado. "
+             "Si lo dejas apagado se usa el modelo de baches incluido por defecto.",
+    )
 
     if use_custom_model:
         model_path_input = st.text_input(
             label="model_path_custom",
             placeholder=r"C:\modelos\mi_modelo_baches.pt",
             label_visibility="collapsed",
-            help="Ruta a los weights .pt de tu modelo fine-tuned.",
+            help="Ruta al archivo .pt de tu modelo entrenado.",
         )
         if model_path_input.strip():
             mp = Path(model_path_input.strip())
@@ -553,13 +268,13 @@ with col_left:
         local_pothole = Path(POTHOLE_MODEL_NAME)
         if local_pothole.exists():
             st.markdown(
-                "<div class='path-hint ok'>✓ Modelo de baches listo (keremberke/yolov8-pothole)</div>",
+                "<div class='path-hint ok'>✓ Sistema de detección de baches listo para usar</div>",
                 unsafe_allow_html=True,
             )
         else:
             st.markdown(
-                "<div class='path-hint' style='color:#fbbf24'>"
-                "⬇ Se descargará el modelo fine-tuned en baches (~22 MB) al ejecutar"
+                "<div class='path-hint' style='color:#b45309'>"
+                "⬇ El sistema de detección (~22 MB) se descargará automáticamente al iniciar el análisis"
                 "</div>",
                 unsafe_allow_html=True,
             )
@@ -567,31 +282,48 @@ with col_left:
         model_ok = True
 
     st.markdown("<hr>", unsafe_allow_html=True)
-    st.markdown("### Parámetros del pipeline")
+    st.markdown("### Parámetros del análisis")
 
-    distance_interval = st.slider("Intervalo de muestreo (metros)", 3, 20, 7, step=1)
+    distance_interval = st.slider(
+        "Distancia entre fotografías analizadas (metros)", 3, 20, 7, step=1,
+        help="Cada cuántos metros recorridos se toma una fotografía para analizar. "
+             "Un valor menor da más detalle, pero genera más imágenes para procesar.",
+    )
 
-    with st.expander("⚙️ Parámetros de mejora de imagen"):
-        clahe_clip  = st.slider("CLAHE — clip limit",        1.0, 5.0, 3.0, step=0.5)
-        clahe_tile  = st.slider("CLAHE — tile size (px)",    4,   16,  8,   step=4)
-        unsharp_str = st.slider("Unsharp Mask — intensidad", 0.3, 2.0, 1.2, step=0.1)
+    with st.expander("⚙️ Ajustes de calidad de imagen"):
+        clahe_clip  = st.slider(
+            "Nivel de contraste local", 1.0, 5.0, 3.0, step=0.5,
+            help="Resalta el contraste en zonas con sombra o poca luz. Valores muy altos pueden generar ruido.",
+        )
+        clahe_tile  = st.slider(
+            "Tamaño de zona de contraste (px)", 4, 16, 8, step=4,
+            help="Tamaño de la región usada para calcular el contraste local. 8 px es el valor estándar.",
+        )
+        unsharp_str = st.slider(
+            "Nitidez de bordes", 0.3, 2.0, 1.2, step=0.1,
+            help="Resalta los bordes y contornos de la vía. Valores mayores a 1.5 pueden generar halos.",
+        )
 
-    with st.expander("⚙️ Parámetros de detección YOLOv8"):
-        conf_threshold = st.slider("Confianza mínima (confidence)", 0.1, 0.9, 0.35, step=0.05)
+    with st.expander("⚙️ Ajustes de detección de baches"):
+        conf_threshold = st.slider(
+            "Sensibilidad de detección", 0.1, 0.9, 0.35, step=0.05,
+            help="Qué tan segura debe estar la IA antes de marcar un bache. "
+                 "Un valor más bajo detecta más baches, pero también más falsos positivos.",
+        )
         max_box_ratio  = st.slider(
-            "Tamaño máximo del box (% del frame)",
+            "Tamaño máximo de un bache detectado (% de la imagen)",
             5, 60, 20, step=5,
-            help="Descarta detecciones cuya área supere este % del frame total."
+            help="Descarta detecciones cuya área supere este porcentaje de la fotografía completa."
         )
         road_margin_pct = st.slider(
-            "Margen lateral a ignorar (% de cada lado)",
+            "Margen lateral ignorado (%)",
             0, 40, 20, step=5,
-            help="Ignora detecciones fuera del corredor central de la imagen."
+            help="Ignora detecciones cerca de los bordes laterales de la imagen (berma, vegetación, etc.)."
         )
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    run_btn = st.button("▶  Ejecutar pipeline completo", use_container_width=True)
+    run_btn = st.button("▶  Iniciar análisis de la vía", use_container_width=True)
 
     yolo_ready = YOLO_AVAILABLE and (model_ok) and (
         (model_path_resolved != "AUTO_POTHOLE") or HF_AVAILABLE
@@ -607,13 +339,13 @@ with col_left:
         if srt_file is None:
             msgs.append("Sube el archivo .SRT")
         if not YOLO_AVAILABLE:
-            msgs.append("Instala ultralytics ultralyticsplus")
+            msgs.append("Instala el sistema de detección (ver instrucciones arriba)")
         elif model_path_resolved == "AUTO_POTHOLE" and not HF_AVAILABLE:
-            msgs.append("Instala ultralyticsplus")
+            msgs.append("Falta un componente del sistema de detección")
         elif not model_ok:
             msgs.append("Ruta de modelo no válida")
         st.markdown(
-            f"<div style='text-align:center;color:#f87171;font-size:0.82rem;margin-top:0.5rem'>"
+            f"<div style='text-align:center;color:#b91c1c;font-size:0.85rem;margin-top:0.5rem'>"
             f"{'  ·  '.join(msgs)}</div>",
             unsafe_allow_html=True,
         )
@@ -622,31 +354,32 @@ with col_left:
 # ── COLUMNA DERECHA ────────────────────────────────────────────────────────────
 
 with col_right:
-    st.markdown("### Estado del pipeline")
+    st.markdown("### Estado del análisis")
 
     steps = [
-        ("01", "Parseo GPS",              "Extrae coordenadas y frame_number del .SRT"),
-        ("02", "Selección por distancia", f"1 frame cada {distance_interval} m recorrido"),
-        ("03", "Extracción de frames",    "Lee el video y exporta los JPEGs seleccionados"),
-        ("04", "Mejora de imagen",        "Denoise → CLAHE → Unsharp Mask → Normalización"),
-        ("05", "Detección YOLOv8",        "Inferencia de baches · Bounding boxes + GPS"),
+        ("1", "Ubicación del recorrido",  "Lee la posición GPS registrada por el dron en cada punto del vuelo."),
+        ("2", "Selección de fotografías", f"Elige una imagen cada {distance_interval} m recorridos, para cubrir toda la vía sin repetir tomas."),
+        ("3", "Extracción de imágenes",   "Obtiene del video las fotografías de los puntos seleccionados."),
+        ("4", "Mejora de calidad",        "Ajusta contraste, nitidez y color para que los defectos se distingan mejor."),
+        ("5", "Detección de baches",      "Analiza cada fotografía y marca los baches encontrados junto con su ubicación GPS."),
     ]
 
-    STATUS_BADGE = {"pending": "badge-warn", "running": "badge-warn", "done": "badge-ok", "error": "badge-err"}
-    STATUS_LABEL = {"pending": "PENDIENTE",  "running": "PROCESANDO…","done": "COMPLETADO","error": "ERROR"}
-    BORDER_COLOR = {"pending": "#1e2530",    "running": "#1e3a8a",    "done": "#166534",   "error": "#7f1d1d"}
+    STATUS_BADGE = {"pending": "badge-pending", "running": "badge-running", "done": "badge-ok", "error": "badge-err"}
+    STATUS_ICON  = {"pending": "○", "running": "⏳", "done": "✓", "error": "⚠"}
+    STATUS_LABEL = {"pending": "En espera", "running": "Procesando…", "done": "Completado", "error": "Necesita atención"}
+    BORDER_COLOR = {"pending": "#d6d3d1", "running": "#fcd34d", "done": "#86efac", "error": "#fca5a5"}
 
     def render_step(ph, i, state):
         num, title, desc = steps[i]
         ph.markdown(f"""
-        <div class="step-card" style="border-color:{BORDER_COLOR[state]}">
+        <div class="step-card" style="border-left-color:{BORDER_COLOR[state]}">
             <div style="display:flex;justify-content:space-between;align-items:flex-start">
                 <div>
-                    <div class="step-label">Paso {num}</div>
+                    <div class="step-label">Paso {num} de {TOTAL_STEPS}</div>
                     <div class="step-title">{title}</div>
                     <div class="step-desc">{desc}</div>
                 </div>
-                <span class="badge {STATUS_BADGE[state]}">{STATUS_LABEL[state]}</span>
+                <span class="badge {STATUS_BADGE[state]}">{STATUS_ICON[state]} {STATUS_LABEL[state]}</span>
             </div>
         </div>""", unsafe_allow_html=True)
 
@@ -668,13 +401,17 @@ with col_right:
 
     if run_btn:
         if not ready:
-            st.warning("⚠️ Completa los archivos de entrada antes de ejecutar.")
+            st.warning("⚠️ Completa los datos de entrada antes de iniciar el análisis.")
         else:
             st.session_state.step_status = ["pending"] * TOTAL_STEPS
             st.session_state["zip_ready"] = False
             st.session_state["zip_bytes"] = None
+            st.session_state["zip_filename"] = None
 
-            out_root = PROJECT_ROOT / "output"
+            video_stem = re.sub(r"[^A-Za-z0-9_-]+", "_", Path(video_path_input.strip()).stem)
+            run_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{video_stem}"
+
+            out_root = PROJECT_ROOT / "output" / run_id
             out_root.mkdir(parents=True, exist_ok=True)
 
             raw_dir = Path(tempfile.mkdtemp(prefix="road_ai_raw_"))
@@ -684,81 +421,113 @@ with col_right:
             for d in [det_dir, csv_dir]:
                 reset_output_dir(d)
 
-            # PASO 1
-            update_step(0, "running")
-            try:
-                srt_content = srt_file.read().decode("utf-8")
-                metadata_df = parse_srt(srt_content)
-                if metadata_df.empty:
+            with st.spinner("Analizando la vía — esto puede tardar varios minutos según la duración del video. No cierres esta ventana."):
+                # PASO 1
+                update_step(0, "running")
+                try:
+                    srt_content = srt_file.read().decode("utf-8")
+                    metadata_df = parse_srt(srt_content)
+                    if metadata_df.empty:
+                        update_step(0, "error")
+                        st.error(
+                            "No se encontraron datos de ubicación GPS en el archivo .SRT. "
+                            "Verifica que sea el archivo de telemetría generado por el dron, no el video."
+                        )
+                        st.stop()
+                    update_step(0, "done")
+                except Exception as e:
                     update_step(0, "error")
-                    st.error("❌ No se encontraron datos GPS en el SRT.")
+                    st.error("No se pudo leer el archivo de registro de vuelo GPS.")
+                    with st.expander("Detalle técnico"):
+                        st.code(str(e))
                     st.stop()
-                update_step(0, "done")
-            except Exception as e:
-                update_step(0, "error"); st.error(f"❌ Parseo SRT: {e}"); st.stop()
 
-            # PASO 2
-            update_step(1, "running")
-            try:
-                selected_df = select_frames_by_distance(metadata_df, distance_interval)
-                if selected_df.empty:
+                # PASO 2
+                update_step(1, "running")
+                try:
+                    selected_df = select_frames_by_distance(metadata_df, distance_interval)
+                    if selected_df.empty:
+                        update_step(1, "error")
+                        st.error(
+                            f"No se seleccionó ninguna fotografía con un intervalo de {distance_interval} m. "
+                            "El recorrido puede ser muy corto — prueba con una distancia menor."
+                        )
+                        st.stop()
+                    frame_numbers = selected_df["frame_number"].astype(int).tolist()
+                    update_step(1, "done")
+                except Exception as e:
                     update_step(1, "error")
-                    st.error("❌ Sin frames seleccionados. Reduce el intervalo.")
+                    st.error("No se pudieron seleccionar los puntos de muestreo.")
+                    with st.expander("Detalle técnico"):
+                        st.code(str(e))
                     st.stop()
-                frame_numbers = selected_df["frame_number"].astype(int).tolist()
-                update_step(1, "done")
-            except Exception as e:
-                update_step(1, "error"); st.error(f"❌ Selección: {e}"); st.stop()
 
-            # PASO 3
-            update_step(2, "running")
-            progress_bar.progress(0)
-            try:
-                saved_paths = extract_frames(
-                    video_path_input.strip(), frame_numbers,
-                    raw_dir, progress_bar, status_text,
-                )
-                if not saved_paths:
+                # PASO 3
+                update_step(2, "running")
+                progress_bar.progress(0)
+                try:
+                    saved_paths = extract_frames(
+                        video_path_input.strip(), frame_numbers,
+                        raw_dir, progress_bar, status_text,
+                    )
+                    if not saved_paths:
+                        update_step(2, "error")
+                        st.error(
+                            "No se pudieron extraer fotografías del video. "
+                            "Verifica que la ruta sea correcta y que el archivo no esté dañado."
+                        )
+                        st.stop()
+                    update_step(2, "done")
+                except Exception as e:
                     update_step(2, "error")
-                    st.error("❌ No se pudieron extraer frames del video.")
+                    st.error("Ocurrió un problema al leer el video.")
+                    with st.expander("Detalle técnico"):
+                        st.code(str(e))
                     st.stop()
-                update_step(2, "done")
-            except Exception as e:
-                update_step(2, "error"); st.error(f"❌ Extracción: {e}"); st.stop()
 
-            # PASO 4
-            update_step(3, "running")
-            progress_bar.progress(0)
-            try:
-                enhanced_paths = enhance_all(
-                    saved_paths, enh_dir,
-                    clahe_clip, clahe_tile, unsharp_str,
-                    progress_bar, status_text,
-                )
-                update_step(3, "done")
-            except Exception as e:
-                update_step(3, "error"); st.error(f"❌ Mejora: {e}"); st.stop()
+                # PASO 4
+                update_step(3, "running")
+                progress_bar.progress(0)
+                try:
+                    enhanced_paths = enhance_all(
+                        saved_paths, enh_dir,
+                        clahe_clip, clahe_tile, unsharp_str,
+                        progress_bar, status_text,
+                    )
+                    update_step(3, "done")
+                except Exception as e:
+                    update_step(3, "error")
+                    st.error("Ocurrió un problema al mejorar la calidad de las imágenes.")
+                    with st.expander("Detalle técnico"):
+                        st.code(str(e))
+                    st.stop()
 
-            # PASO 5 — YOLOv8
-            update_step(4, "running")
-            progress_bar.progress(0)
-            try:
-                yolo_model, is_pothole_model = load_pothole_model(
-                    model_path_resolved, status_text
-                )
-                annotated_paths, detections_df = run_yolo_detection(
-                    yolo_model, is_pothole_model,
-                    enhanced_paths, selected_df,
-                    det_dir, conf_threshold,
-                    max_box_ratio, road_margin_pct,
-                    progress_bar, status_text,
-                )
-                update_step(4, "done")
-            except Exception as e:
-                update_step(4, "error"); st.error(f"❌ Detección YOLO: {e}"); st.stop()
+                # PASO 5 — Detección
+                update_step(4, "running")
+                progress_bar.progress(0)
+                try:
+                    yolo_model, is_pothole_model = load_pothole_model(
+                        model_path_resolved, status_text
+                    )
+                    annotated_paths, detections_df = run_yolo_detection(
+                        yolo_model, is_pothole_model,
+                        enhanced_paths, selected_df,
+                        det_dir, conf_threshold,
+                        max_box_ratio, road_margin_pct,
+                        progress_bar, status_text,
+                    )
+                    update_step(4, "done")
+                except Exception as e:
+                    update_step(4, "error")
+                    st.error("Ocurrió un problema durante la detección de baches.")
+                    with st.expander("Detalle técnico"):
+                        st.code(str(e))
+                    st.stop()
 
-            progress_bar.progress(1.0)
-            status_text.empty()
+                progress_bar.progress(1.0)
+                status_text.empty()
+
+            st.success("✓ Análisis completado. Resultados listos más abajo.")
 
             # ── Métricas finales ───────────────────────────────────────────────
             total_baches = len(detections_df) if not detections_df.empty else 0
@@ -771,19 +540,19 @@ with col_right:
             <div class="metric-row">
                 <div class="metric-box">
                     <div class="metric-val">{len(metadata_df):,}</div>
-                    <div class="metric-lbl">Frames GPS</div>
+                    <div class="metric-lbl">Puntos GPS registrados</div>
                 </div>
                 <div class="metric-box">
                     <div class="metric-val">{len(frame_numbers)}</div>
-                    <div class="metric-lbl">Analizados</div>
+                    <div class="metric-lbl">Fotografías analizadas</div>
                 </div>
                 <div class="metric-box">
-                    <div class="metric-val" style="color:{'#f87171' if total_baches > 0 else '#4ade80'}">{total_baches}</div>
+                    <div class="metric-val" style="color:{'#b91c1c' if total_baches > 0 else '#15803d'}">{total_baches}</div>
                     <div class="metric-lbl">Baches detectados</div>
                 </div>
                 <div class="metric-box">
                     <div class="metric-val">{frames_con_baches}</div>
-                    <div class="metric-lbl">Frames afectados</div>
+                    <div class="metric-lbl">Fotografías con baches</div>
                 </div>
             </div>
             """, unsafe_allow_html=True)
@@ -801,7 +570,7 @@ with col_right:
                 preview_paths = preview_paths[:3]
 
             if preview_paths:
-                st.markdown("#### Preview — frames detectados")
+                st.markdown("#### Vista previa — antes y después")
                 for i, ap in enumerate(preview_paths):
                     frame_num = int(Path(ap).stem.split("_")[-1])
                     enh_match = [p for p in enhanced_paths
@@ -823,7 +592,7 @@ with col_right:
                         det_rgb = cv2.cvtColor(cv2.imread(ap),    cv2.COLOR_BGR2RGB)
                         with c1:
                             st.image(enh_rgb, use_container_width=True)
-                            st.markdown(f"<div class='img-caption'>MEJORADA · frame_{frame_num}</div>",
+                            st.markdown(f"<div class='img-caption'>MEJORADA · foto {frame_num}</div>",
                                         unsafe_allow_html=True)
                         with c2:
                             st.image(det_rgb, use_container_width=True)
@@ -832,7 +601,7 @@ with col_right:
                     else:
                         det_rgb = cv2.cvtColor(cv2.imread(ap), cv2.COLOR_BGR2RGB)
                         st.image(det_rgb, use_container_width=True)
-                        st.markdown(f"<div class='img-caption'>frame_{frame_num} · {det_label}</div>",
+                        st.markdown(f"<div class='img-caption'>foto {frame_num} · {det_label}</div>",
                                     unsafe_allow_html=True)
 
                     if i < len(preview_paths) - 1:
@@ -840,20 +609,28 @@ with col_right:
 
             # ── Tabla de detecciones ───────────────────────────────────────────
             if not detections_df.empty:
-                with st.expander(f"📋 Tabla de detecciones ({total_baches} registros)"):
+                with st.expander(f"📋 Detalle de baches detectados ({total_baches} registros)"):
                     display_cols = ["frame_number", "lat", "lon", "label", "confidence",
                                     "x1", "y1", "x2", "y2"]
+                    tabla = detections_df[display_cols].rename(columns={
+                        "frame_number": "Fotografía",
+                        "lat": "Latitud",
+                        "lon": "Longitud",
+                        "label": "Tipo",
+                        "confidence": "Confianza",
+                        "x1": "x1 (px)", "y1": "y1 (px)", "x2": "x2 (px)", "y2": "y2 (px)",
+                    })
                     st.dataframe(
-                        detections_df[display_cols].style.format({
-                            "confidence": "{:.3f}",
-                            "lat": "{:.6f}",
-                            "lon": "{:.6f}",
+                        tabla.style.format({
+                            "Confianza": "{:.3f}",
+                            "Latitud": "{:.6f}",
+                            "Longitud": "{:.6f}",
                         }),
                         use_container_width=True,
                     )
             else:
-                st.info("ℹ️ No se detectaron baches con el umbral de confianza actual. "
-                        "Prueba reducir el slider de confianza mínima.")
+                st.info("ℹ️ No se detectaron baches con la sensibilidad actual. "
+                        "Prueba reducir el valor de sensibilidad de detección.")
 
             # ── Guardar CSVs ───────────────────────────────────────────────────
             metadata_df.to_csv(csv_dir / "drone_metadata.csv", index=False)
@@ -861,17 +638,33 @@ with col_right:
             if not detections_df.empty:
                 detections_df.to_csv(csv_dir / "detections.csv", index=False)
 
-            # ── ZIP ────────────────────────────────────────────────────────────
-            master_zip_path = out_root.parent / "road_ai_results"
-            shutil.make_archive(str(master_zip_path), "zip", str(out_root))
-
-            zip_file_path = str(master_zip_path) + ".zip"
-            with open(zip_file_path, "rb") as zf:
-                st.session_state["zip_bytes"] = zf.read()
+            # ── ZIP (armado en memoria, sin duplicar archivos en disco) ─────────
+            zip_buffer = io.BytesIO()
+            with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+                for file_path in out_root.rglob("*"):
+                    if file_path.is_file():
+                        zf.write(file_path, arcname=(Path(run_id) / file_path.relative_to(out_root)).as_posix())
+            st.session_state["zip_bytes"] = zip_buffer.getvalue()
+            st.session_state["zip_filename"] = f"road_ai_results_{run_id}.zip"
             st.session_state["zip_ready"] = True
 
+            # Las carpetas temporales de extracción/mejora ya no se necesitan
+            shutil.rmtree(raw_dir, ignore_errors=True)
+            shutil.rmtree(enh_dir, ignore_errors=True)
+
             st.markdown("<br>", unsafe_allow_html=True)
-            st.info(f"📁 Archivos guardados en: `{out_root}`")
+            st.info(
+                f"📁 Resultados guardados en: `output/{run_id}` — cada video que proceses "
+                "queda en su propia carpeta con fecha y nombre, para poder revisarlos o compararlos después."
+            )
+
+            # Fuerza a adjuntar de nuevo el video y el .SRT en la próxima corrida:
+            # evita reutilizar por error la telemetría de este video con el siguiente.
+            st.session_state.input_generation += 1
+            st.caption(
+                "Para procesar otro video, escribe su ruta y sube su propio archivo .SRT — "
+                "los campos se limpiaron para evitar mezclar datos de vuelos distintos."
+            )
 
 # ── Descarga persistente ───────────────────────────────────────────────────────
 
@@ -879,9 +672,9 @@ if st.session_state.get("zip_ready") and st.session_state.get("zip_bytes"):
     st.markdown("<br>", unsafe_allow_html=True)
     with col_right:
         st.download_button(
-            label="⬇  Descargar todo (imágenes + detecciones + CSVs)",
+            label="⬇  Descargar resultados completos (fotografías y datos)",
             data=st.session_state["zip_bytes"],
-            file_name="road_ai_results.zip",
+            file_name=st.session_state.get("zip_filename") or "road_ai_results.zip",
             mime="application/zip",
             use_container_width=True,
         )
